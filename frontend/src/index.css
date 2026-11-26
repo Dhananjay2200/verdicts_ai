@@ -1,136 +1,177 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: #F8F9FA;
+    color: #111827;
+  }
+
   body {
-    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: #F8F9FA;
+    color: #111827;
   }
 }
 
-.font-serif-title {
-  font-family: 'Cinzel', serif;
-  letter-spacing: -0.01em;
-}
-
+.font-serif-headline,
+.font-serif-title,
 .font-serif-body {
-  font-family: 'Merriweather', serif;
+  font-family: 'Merriweather', Georgia, Cambria, 'Times New Roman', serif;
 }
 
-/* Judicial glow accents */
-.glow-gold {
-  box-shadow: 0 0 30px -5px rgba(212, 175, 55, 0.25);
+.font-sans-ui {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-.glow-crimson {
-  box-shadow: 0 0 25px -5px rgba(239, 68, 68, 0.2);
+/* Broadsheet Structured Article Typography */
+.broadsheet-prose {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #111827;
 }
 
-.glow-navy {
-  box-shadow: 0 0 30px -5px rgba(30, 58, 138, 0.35);
-}
-
-/* Elegant gold border gradient */
-.border-gold-subtle {
-  border-color: rgba(212, 175, 55, 0.25);
-}
-
-.border-gold-hover:hover {
-  border-color: rgba(212, 175, 55, 0.6);
-}
-
-/* Custom Scrollbar */
-::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
-}
-
-::-webkit-scrollbar-track {
-  background: #070b19;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #d4af37;
-}
-
-/* Markdown styling inside Article Modal */
-.prose-legal h1, .prose-legal h2, .prose-legal h3 {
-  color: #f8fafc;
-  font-family: 'Cinzel', serif;
+.broadsheet-prose h1,
+.broadsheet-prose h2,
+.broadsheet-prose h3,
+.broadsheet-prose h4 {
+  font-family: 'Merriweather', Georgia, serif;
+  color: #111827;
   font-weight: 700;
-  margin-top: 1.75rem;
-  margin-bottom: 0.75rem;
-  letter-spacing: -0.01em;
+  line-height: 1.3;
+  margin-top: 2.25rem;
+  margin-bottom: 0.875rem;
 }
 
-.prose-legal h2 {
-  font-size: 1.35rem;
-  border-bottom: 1px solid rgba(212, 175, 55, 0.2);
-  padding-bottom: 0.4rem;
+.broadsheet-prose h1 {
+  font-size: 1.65rem;
 }
 
-.prose-legal h3 {
+.broadsheet-prose h2 {
+  font-size: 1.375rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #D1D5DB;
+}
+
+.broadsheet-prose h3 {
   font-size: 1.15rem;
-  color: #e2e8f0;
+  color: #1E3A5F;
 }
 
-.prose-legal p {
-  color: #cbd5e1;
-  font-family: 'Merriweather', serif;
-  line-height: 1.8;
-  margin-bottom: 1.25rem;
-  font-size: 0.98rem;
+.broadsheet-prose p {
+  font-size: 1.125rem;
+  line-height: 2rem;
+  color: #111827;
+  margin-bottom: 1.35rem;
 }
 
-.prose-legal blockquote {
-  border-left: 3px solid #d4af37;
-  padding: 0.75rem 1.25rem;
-  margin: 1.5rem 0;
-  background: rgba(212, 175, 55, 0.05);
-  border-radius: 0 0.5rem 0.5rem 0;
+.broadsheet-prose strong {
+  font-weight: 600;
+  color: #111827;
+}
+
+.broadsheet-prose a {
+  color: #1E3A5F;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.broadsheet-prose a:hover {
+  color: #991B1B;
+}
+
+.broadsheet-prose blockquote {
+  font-family: 'Merriweather', Georgia, serif;
   font-style: italic;
-  color: #f1f5f9;
+  font-size: 1.125rem;
+  line-height: 1.85rem;
+  color: #111827;
+  background-color: #F8F9FA;
+  border-left: 4px solid #1E3A5F;
+  padding: 1rem 1.25rem;
+  margin: 1.75rem 0;
 }
 
-.prose-legal table {
+.broadsheet-prose ul,
+.broadsheet-prose ol {
+  margin: 1.25rem 0;
+  padding-left: 1.5rem;
+  font-size: 1.0625rem;
+  line-height: 1.85rem;
+  color: #111827;
+}
+
+.broadsheet-prose ul {
+  list-style-type: disc;
+}
+
+.broadsheet-prose ol {
+  list-style-type: decimal;
+}
+
+.broadsheet-prose li {
+  margin-bottom: 0.5rem;
+}
+
+.broadsheet-prose table {
   width: 100%;
   border-collapse: collapse;
-  margin: 1.5rem 0;
-  font-size: 0.88rem;
-  background: rgba(15, 23, 42, 0.6);
-  border-radius: 0.5rem;
-  overflow: hidden;
+  margin: 1.75rem 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  background-color: #FFFFFF;
+  border: 1px solid #D1D5DB;
 }
 
-.prose-legal th {
-  background: rgba(30, 41, 59, 0.9);
-  color: #d4af37;
-  padding: 0.75rem 1rem;
-  text-align: left;
+.broadsheet-prose thead th {
+  background-color: #F8F9FA;
+  color: #1E3A5F;
   font-weight: 600;
-  border-bottom: 1px solid rgba(212, 175, 55, 0.3);
-}
-
-.prose-legal td {
+  text-align: left;
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid rgba(51, 65, 85, 0.4);
-  color: #cbd5e1;
+  border-bottom: 2px solid #1E3A5F;
+  border-right: 1px solid #D1D5DB;
 }
 
-.prose-legal tr:last-child td {
+.broadsheet-prose thead th:last-child {
+  border-right: none;
+}
+
+.broadsheet-prose td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #D1D5DB;
+  border-right: 1px solid #E5E7EB;
+  color: #111827;
+  vertical-align: top;
+}
+
+.broadsheet-prose td:last-child {
+  border-right: none;
+}
+
+.broadsheet-prose tbody tr:last-child td {
   border-bottom: none;
 }
 
-.prose-legal ul, .prose-legal ol {
-  margin: 1rem 0;
-  padding-left: 1.5rem;
-  color: #cbd5e1;
+.broadsheet-prose hr {
+  border: 0;
+  border-top: 1px solid #D1D5DB;
+  margin: 2rem 0;
 }
 
-.prose-legal li {
-  margin-bottom: 0.5rem;
-  line-height: 1.7;
+/* Subtle scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F8F9FA;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
 }

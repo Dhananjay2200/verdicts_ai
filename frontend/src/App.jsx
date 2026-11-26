@@ -1,374 +1,376 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import Header from './components/Header';
-import Hero from './components/Hero';
-import Filters from './components/Filters';
-import VerdictCard from './components/VerdictCard';
-import ArticleModal from './components/ArticleModal';
-import NewsSection from './components/NewsSection';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Masthead, { TOPIC_TABS } from './components/Masthead';
+import BroadsheetHome from './components/BroadsheetHome';
+import ArticleDetail from './components/ArticleDetail';
+import BroadsheetFooter from './components/BroadsheetFooter';
+import {
+  BroadsheetEmptyState,
+  BroadsheetErrorBanner,
+  BroadsheetSkeleton,
+} from './components/States';
 import AdminPortal from './views/AdminPortal';
-import Footer from './components/Footer';
-import { Scale, Globe, BookMarked, RefreshCw, AlertCircle, Landmark } from 'lucide-react';
-import { JURISDICTIONS_LIST } from './components/Filters';
-import { apiUrl } from './config';
+import {
+  API_BASE_URL,
+  computeArticlesSignature,
+  fetchArticles,
+  fetchTopics,
+  subscribeCatalogUpdates,
+} from './services/api';
+
+function parseRoute() {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/';
+  const hash = window.location.hash.toLowerCase();
+
+  if (path === '/admin' || path.endsWith('/admin') || hash === '#admin') {
+    return { view: 'admin', slug: null };
+  }
+
+  const articleMatch = path.match(/\/article\/([^/]+)$/);
+  if (articleMatch) {
+    return { view: 'article', slug: decodeURIComponent(articleMatch[1]) };
+  }
+
+  return { view: 'home', slug: null };
+}
 
 export default function App() {
-  // Portal switcher: 'user' | 'admin'
-  const [portal, setPortal] = useState(() => {
-    const hash = window.location.hash.toLowerCase();
-    if (hash === '#admin') return 'admin';
-    return 'user';
-  });
+  const [route, setRoute] = useState(parseRoute);
 
+  // Public broadsheet state
   const [articles, setArticles] = useState([]);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [jurisdictions, setJurisdictions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  
-  // Navigation & Tabs within User Portal
-  const [activeTab, setActiveTab] = useState('verdicts'); // 'verdicts' | 'news' | 'jurisdictions' | 'bookmarks'
-  
-  // Modals
-  const [selectedArticle, setSelectedArticle] = useState(null);
-  
-  // Filters
+
+  // Active filters
+  const [activeTabId, setActiveTabId] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedJurisdiction, setSelectedJurisdiction] = useState('All Jurisdictions');
-  const [selectedCategory, setSelectedCategory] = useState('All Categories');
-  const [selectedYear, setSelectedYear] = useState('All Years');
-  const [articleType, setArticleType] = useState('ALL');
 
-  // Bookmarks
-  const [bookmarks, setBookmarks] = useState(() => {
-    try {
-      const saved = localStorage.getItem('verdicts_ai_bookmarks');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Selected article cache for smooth navigation
+  const [activeArticle, setActiveArticle] = useState(null);
+  // Preview article when inspecting from AdminPortal
+  const [adminPreviewArticle, setAdminPreviewArticle] = useState(null);
+  // Newly published notice banner (auto-dismissed)
+  const [liveUpdateBanner, setLiveUpdateBanner] = useState(null);
 
-  const exploreRef = useRef(null);
+  // Refs for silent ETag polling without flicker
+  const etagRef = useRef(null);
+  const signatureRef = useRef('');
+  const knownIdsRef = useRef(new Set());
+  const hasLoadedOnceRef = useRef(false);
 
-  // Synchronize hash changes
+  // Sync browser back/forward navigation
   useEffect(() => {
-    const handleHash = () => {
-      if (window.location.hash.toLowerCase() === '#admin') {
-        setPortal('admin');
-      } else {
-        setPortal('user');
-        fetchArticles();
+    const handleLocationChange = () => {
+      const next = parseRoute();
+      setRoute(next);
+      if (next.view !== 'article') {
+        setActiveArticle(null);
       }
     };
-    window.addEventListener('hashchange', handleHash);
-    return () => window.removeEventListener('hashchange', handleHash);
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+    };
   }, []);
 
-  // Fetch articles from backend API
-  const fetchArticles = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (selectedJurisdiction !== 'All Jurisdictions') params.append('jurisdiction', selectedJurisdiction);
-      if (selectedCategory !== 'All Categories') params.append('category', selectedCategory);
-      if (selectedYear !== 'All Years') params.append('year', selectedYear);
-      if (articleType !== 'ALL') params.append('article_type', articleType);
-      if (searchQuery.trim()) params.append('search', searchQuery.trim());
-
-      const res = await fetch(apiUrl(`/api/v1/articles?${params.toString()}`));
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-      const data = await res.json();
-      setArticles(data.articles || []);
-    } catch (err) {
-      console.error('Failed to load articles:', err);
-      setError('Unable to connect to the Verdicts AI backend service.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Debounce search input
   useEffect(() => {
-    if (portal === 'user') {
-      fetchArticles();
-    }
-  }, [portal, selectedJurisdiction, selectedCategory, selectedYear, articleType, searchQuery]);
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery.trim());
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
-  // Dynamically extract unique years from all articles + known landmark eras
-  const availableYears = useMemo(() => {
-    const yearsSet = new Set();
-    articles.forEach((a) => {
-      const text = `${a.decision_date || ''} ${a.citation || ''} ${a.published_at || ''}`;
-      const matches = text.match(/\b(19\d\d|20\d\d)\b/g);
-      if (matches) {
-        matches.forEach((y) => yearsSet.add(y));
+  // Load backend jurisdictions/categories metadata once
+  useEffect(() => {
+    if (route.view === 'admin') return;
+    fetchTopics({ limit: 1 })
+      .then((data) => {
+        if (Array.isArray(data?.jurisdictions)) {
+          setJurisdictions(data.jurisdictions);
+        }
+      })
+      .catch(() => {
+        // Non-fatal; dropdown gracefully falls back to All Jurisdictions
+      });
+  }, [route.view]);
+
+  // Load articles when filters or view change; supports silent ETag polling
+  const loadArticles = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+        etagRef.current = null;
       }
-    });
-    // Add known key judicial years
-    ["2026", "2024", "2021", "2020", "2019", "2017", "2001", "1995", "1992", "1988", "1986", "1973", "1954", "1932"].forEach((y) => yearsSet.add(y));
-    const sorted = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
-    return ["All Years", ...sorted];
-  }, [articles]);
 
-  // Bookmarks toggle
-  const handleToggleBookmark = (article) => {
-    setBookmarks((prev) => {
-      const exists = prev.some((b) => b.id === article.id);
-      const updated = exists ? prev.filter((b) => b.id !== article.id) : [...prev, article];
-      localStorage.setItem('verdicts_ai_bookmarks', JSON.stringify(updated));
-      return updated;
+      const activeTab = TOPIC_TABS.find((t) => t.id === activeTabId) || TOPIC_TABS[0];
+
+      try {
+        const data = await fetchArticles({
+          category: activeTab.category,
+          articleType: activeTab.articleType,
+          jurisdiction: selectedJurisdiction,
+          search: debouncedSearch,
+          status: 'PUBLISHED',
+          limit: 50,
+          offset: 0,
+          knownEtag: silent ? etagRef.current : null,
+        });
+
+        if (data.unchanged) {
+          return;
+        }
+
+        etagRef.current = data.etag || null;
+        const nextSignature = computeArticlesSignature(data.articles, data.total);
+
+        if (silent && nextSignature === signatureRef.current) {
+          return;
+        }
+
+        // Detect newly published article during live background sync
+        if (silent && hasLoadedOnceRef.current) {
+          const newlyAdded = data.articles.find((a) => !knownIdsRef.current.has(a.id));
+          if (newlyAdded) {
+            setLiveUpdateBanner(newlyAdded);
+          }
+        }
+
+        signatureRef.current = nextSignature;
+        knownIdsRef.current = new Set(data.articles.map((a) => a.id));
+        hasLoadedOnceRef.current = true;
+        setArticles(data.articles);
+        setTotalRecords(data.total);
+        if (silent) setError(null);
+      } catch (err) {
+        if (!silent) {
+          setError(
+            err.message ||
+              'Unable to connect to the Verdicts backend service. Please verify the API server is running.'
+          );
+        }
+      } finally {
+        if (!silent) {
+          setLoading(false);
+        }
+      }
+    },
+    [activeTabId, selectedJurisdiction, debouncedSearch]
+  );
+
+  // Initial & filter-driven load
+  useEffect(() => {
+    if (route.view === 'home') {
+      hasLoadedOnceRef.current = false;
+      loadArticles({ silent: false });
+    }
+  }, [route.view, loadArticles]);
+
+  // Automatic background live sync (ETag polling + cross-tab BroadcastChannel + window focus)
+  useEffect(() => {
+    if (route.view !== 'home') return;
+
+    const pollId = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadArticles({ silent: true });
+      }
+    }, 5000);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        loadArticles({ silent: true });
+      }
+    };
+
+    const unsubscribeSync = subscribeCatalogUpdates(() => {
+      etagRef.current = null;
+      loadArticles({ silent: true });
+    });
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      clearInterval(pollId);
+      unsubscribeSync();
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [route.view, loadArticles]);
+
+  // Auto-dismiss live update notice after 8 seconds
+  useEffect(() => {
+    if (!liveUpdateBanner) return;
+    const timer = setTimeout(() => setLiveUpdateBanner(null), 8000);
+    return () => clearTimeout(timer);
+  }, [liveUpdateBanner]);
+
+  const navigateTo = (nextPath, nextRoute) => {
+    const basePrefix = window.location.pathname.startsWith('/app') ? '/app' : '';
+    const targetUrl =
+      nextPath === '/' && basePrefix ? basePrefix : `${basePrefix}${nextPath}`;
+
+    if (window.location.pathname !== targetUrl || window.location.hash) {
+      window.history.pushState({}, '', targetUrl);
+    }
+    setRoute(nextRoute);
+  };
+
+  const handleOpenArticle = (article) => {
+    setActiveArticle(article);
+    navigateTo(`/article/${encodeURIComponent(article.slug)}`, {
+      view: 'article',
+      slug: article.slug,
     });
   };
 
-  // Distinct feeds
-  const landmarkVerdicts = useMemo(() => {
-    return articles.filter((a) => a.article_type === 'VERDICT_BRIEF');
-  }, [articles]);
-
-  const legalNews = useMemo(() => {
-    return articles.filter((a) => a.article_type === 'LEGAL_NEWS');
-  }, [articles]);
-
-  const featuredVerdict = useMemo(() => {
-    return landmarkVerdicts[0] || articles[0] || null;
-  }, [landmarkVerdicts, articles]);
-
-  const scrollToExplore = () => {
-    exploreRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const handleGoHome = () => {
+    setActiveArticle(null);
+    navigateTo('/', { view: 'home', slug: null });
   };
 
-  // If Admin Portal is active, render full Admin Portal view
-  if (portal === 'admin') {
-    return (
-      <div className="min-h-screen bg-[#070b19] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
-        <AdminPortal
-          onExitToUserPortal={() => {
-            window.location.hash = '';
-            setPortal('user');
-          }}
-          onSelectArticle={(art) => setSelectedArticle(art)}
-        />
-        {selectedArticle && (
-          <ArticleModal
-            article={selectedArticle}
-            onClose={() => setSelectedArticle(null)}
-            isBookmarked={bookmarks.some((b) => b.id === selectedArticle.id)}
-            onToggleBookmark={handleToggleBookmark}
+  const handleSelectTab = (tab) => {
+    setActiveTabId(tab.id);
+    if (route.view !== 'home') {
+      handleGoHome();
+    }
+  };
+
+  const handleResetFilters = () => {
+    setActiveTabId('all');
+    setSearchQuery('');
+    setDebouncedSearch('');
+    setSelectedJurisdiction('All Jurisdictions');
+  };
+
+  // Hidden /admin route (no public admin button anywhere on the broadsheet)
+  if (route.view === 'admin') {
+    if (adminPreviewArticle) {
+      return (
+        <div className="min-h-screen bg-[#F8F9FA] text-[#111827] py-8 px-4 sm:px-6 lg:px-8">
+          <ArticleDetail
+            slug={adminPreviewArticle.slug}
+            initialArticle={adminPreviewArticle}
+            onBack={() => setAdminPreviewArticle(null)}
           />
-        )}
-      </div>
+        </div>
+      );
+    }
+
+    return (
+      <AdminPortal
+        onExitToUserPortal={() => {
+          window.history.pushState({}, '', '/');
+          setRoute({ view: 'home', slug: null });
+        }}
+        onSelectArticle={(art) => setAdminPreviewArticle(art)}
+      />
     );
   }
 
-  // Otherwise, render Public User Portal (UserBlogPortal)
   return (
-    <div className="min-h-screen bg-[#070b19] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
-      
-      {/* Header */}
-      <Header
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        bookmarksCount={bookmarks.length}
-        onOpenAdmin={() => {
-          window.location.hash = '#admin';
-          setPortal('admin');
-        }}
-        newsTicker={legalNews.length > 0 ? legalNews : landmarkVerdicts}
-      />
-
-      {/* Hero Section */}
-      <Hero
-        onExploreClick={scrollToExplore}
-        featuredVerdict={featuredVerdict}
-        onReadVerdict={(art) => setSelectedArticle(art)}
-      />
-
-      {/* Main Content Area */}
-      <main ref={exploreRef} className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full space-y-8">
-        
-        {/* Multi-Dimensional Filters with Decision Year */}
-        <Filters
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          selectedJurisdiction={selectedJurisdiction}
-          setSelectedJurisdiction={setSelectedJurisdiction}
-          selectedCategory={selectedCategory}
-          setSelectedCategory={setSelectedCategory}
-          selectedYear={selectedYear}
-          setSelectedYear={setSelectedYear}
-          availableYears={availableYears}
-          articleType={articleType}
-          setArticleType={setArticleType}
-          totalResults={
-            activeTab === 'news' 
-              ? legalNews.length 
-              : activeTab === 'bookmarks' 
-                ? bookmarks.length 
-                : articles.length
+    <div className="min-h-screen bg-[#F8F9FA] text-[#111827] flex flex-col">
+      <Masthead
+        activeTabId={activeTabId}
+        onSelectTab={handleSelectTab}
+        searchQuery={searchQuery}
+        onSearchChange={(val) => {
+          setSearchQuery(val);
+          if (route.view !== 'home') {
+            handleGoHome();
           }
-        />
+        }}
+        selectedJurisdiction={selectedJurisdiction}
+        onJurisdictionChange={(jur) => {
+          setSelectedJurisdiction(jur);
+          if (route.view !== 'home') {
+            handleGoHome();
+          }
+        }}
+        jurisdictions={jurisdictions}
+        totalCount={totalRecords}
+        onGoHome={() => {
+          handleResetFilters();
+          handleGoHome();
+        }}
+      />
 
-        {/* Loading State */}
-        {loading && (
-          <div className="flex flex-col items-center justify-center p-16 text-slate-400 space-y-3">
-            <RefreshCw className="w-8 h-8 text-amber-400 animate-spin" />
-            <p className="text-sm font-medium">Accessing Supreme Judicial Archives & Case Precedents...</p>
-          </div>
-        )}
-
-        {/* Error State */}
-        {error && !loading && (
-          <div className="p-6 rounded-xl bg-red-950/30 border border-red-500/40 text-center space-y-3">
-            <AlertCircle className="w-10 h-10 text-red-400 mx-auto" />
-            <h3 className="font-serif-title text-lg font-bold text-red-200">{error}</h3>
-            <p className="text-xs text-slate-400">Ensure the backend server is running on http://127.0.0.1:8002.</p>
-            <button
-              onClick={fetchArticles}
-              className="px-4 py-2 rounded-lg bg-red-500/20 text-red-300 border border-red-500/40 text-xs font-semibold hover:bg-red-500/30"
-            >
-              Retry Connection
-            </button>
-          </div>
-        )}
-
-        {/* Active Tab: Landmark Verdicts */}
-        {!loading && !error && activeTab === 'verdicts' && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div>
-                <h2 className="font-serif-title text-2xl font-bold text-white flex items-center gap-2">
-                  <Landmark className="w-6 h-6 text-amber-400" />
-                  <span>Landmark Supreme Court Verdicts & Precedents</span>
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  12-Section encyclopedic analyses covering ratio decidendi, statutory tables, bench splits, and dissents.
-                </p>
-              </div>
-            </div>
-
-            {articles.length === 0 ? (
-              <div className="p-12 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-400">
-                <Scale className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-                <p className="text-sm">No verdicts found matching your criteria. Try resetting filters.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {articles.map((article) => (
-                  <VerdictCard
-                    key={article.id}
-                    article={article}
-                    onRead={(art) => setSelectedArticle(art)}
-                    isBookmarked={bookmarks.some((b) => b.id === article.id)}
-                    onToggleBookmark={handleToggleBookmark}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Active Tab: Worldwide Legal News */}
-        {!loading && !error && activeTab === 'news' && (
-          <NewsSection
-            newsArticles={legalNews}
-            onRead={(art) => setSelectedArticle(art)}
-            bookmarks={bookmarks}
-            onToggleBookmark={handleToggleBookmark}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {route.view === 'article' ? (
+          <ArticleDetail
+            slug={route.slug}
+            initialArticle={activeArticle}
+            onBack={handleGoHome}
           />
-        )}
+        ) : (
+          <>
+            {loading && <BroadsheetSkeleton />}
 
-        {/* Active Tab: Jurisdictions Explorer */}
-        {!loading && !error && activeTab === 'jurisdictions' && (
-          <div className="space-y-6">
-            <div className="pb-3 border-b border-slate-800">
-              <h2 className="font-serif-title text-2xl font-bold text-white flex items-center gap-2">
-                <Globe className="w-6 h-6 text-amber-400" />
-                <span>Worldwide Judicial Jurisdictions Directory</span>
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Explore constitutional jurisprudence across 10 supreme courts and transnational tribunals.
-              </p>
-            </div>
+            {!loading && error && (
+              <BroadsheetErrorBanner
+                message={error}
+                apiBaseUrl={API_BASE_URL || window.location.origin}
+                onRetry={loadArticles}
+              />
+            )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-              {JURISDICTIONS_LIST.filter((j) => j !== 'All Jurisdictions').map((jur) => {
-                const count = articles.filter((a) => a.jurisdiction === jur).length;
-                return (
-                  <div
-                    key={jur}
-                    onClick={() => {
-                      setSelectedJurisdiction(jur);
-                      setActiveTab('verdicts');
-                    }}
-                    className="p-5 rounded-xl bg-[#0b132b]/80 border border-slate-800 hover:border-amber-500/50 transition-all cursor-pointer group shadow-md"
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-bold text-amber-400 group-hover:underline">
-                        Explore
+            {!loading && !error && articles.length === 0 && (
+              <BroadsheetEmptyState onReset={handleResetFilters} />
+            )}
+
+            {!loading && !error && articles.length > 0 && (
+              <>
+                {liveUpdateBanner && (
+                  <div className="mb-5 bg-[#FFFFFF] border border-[#D1D5DB] border-l-4 border-l-[#991B1B] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs sm:text-sm text-[#111827] flex items-center gap-2 min-w-0">
+                      <span className="px-2 py-0.5 bg-[#991B1B] text-white text-[11px] font-semibold shrink-0">
+                        New Ruling Published
                       </span>
-                      <span className="text-xs px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
-                        {count} Precedents
+                      <span className="font-serif-headline font-bold truncate">
+                        {liveUpdateBanner.case_name || liveUpdateBanner.title}
                       </span>
                     </div>
-                    <h3 className="font-serif-title text-lg font-bold text-white group-hover:text-amber-300 transition-colors">
-                      {jur}
-                    </h3>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = liveUpdateBanner;
+                          setLiveUpdateBanner(null);
+                          handleOpenArticle(target);
+                        }}
+                        className="text-xs font-semibold text-[#1E3A5F] hover:underline cursor-pointer"
+                      >
+                        Read Ruling
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLiveUpdateBanner(null)}
+                        className="text-xs text-[#4B5563] hover:text-[#111827] cursor-pointer"
+                        aria-label="Dismiss update banner"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Active Tab: Bookmarks */}
-        {!loading && !error && activeTab === 'bookmarks' && (
-          <div className="space-y-6">
-            <div className="pb-3 border-b border-slate-800 flex items-center justify-between">
-              <div>
-                <h2 className="font-serif-title text-2xl font-bold text-white flex items-center gap-2">
-                  <BookMarked className="w-6 h-6 text-amber-400" />
-                  <span>Saved Precedents & Briefs</span>
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Your personal library of bookmarked supreme court judgments and wire dispatches.
-                </p>
-              </div>
-            </div>
-
-            {bookmarks.length === 0 ? (
-              <div className="p-12 text-center rounded-xl bg-slate-900/40 border border-slate-800 text-slate-400">
-                <BookMarked className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-                <p className="text-sm">You haven't bookmarked any legal verdicts yet.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {bookmarks.map((article) => (
-                  <VerdictCard
-                    key={article.id}
-                    article={article}
-                    onRead={(art) => setSelectedArticle(art)}
-                    isBookmarked={true}
-                    onToggleBookmark={handleToggleBookmark}
-                  />
-                ))}
-              </div>
+                )}
+                <BroadsheetHome
+                  articles={articles}
+                  onOpenArticle={handleOpenArticle}
+                />
+              </>
             )}
-          </div>
+          </>
         )}
-
       </main>
 
-      {/* Article Full 12-Section Modal (Without Score on User side) */}
-      {selectedArticle && (
-        <ArticleModal
-          article={selectedArticle}
-          onClose={() => setSelectedArticle(null)}
-          isBookmarked={bookmarks.some((b) => b.id === selectedArticle.id)}
-          onToggleBookmark={handleToggleBookmark}
-        />
-      )}
-
-      {/* Footer */}
-      <Footer />
-
+      <BroadsheetFooter />
     </div>
   );
 }

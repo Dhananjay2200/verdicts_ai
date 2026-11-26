@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Scale, Shield, Globe, Sparkles, Play, Pause, RefreshCw, 
   Trash2, Eye, CheckCircle2, AlertCircle, ArrowLeft, Layers, 
@@ -6,6 +6,13 @@ import {
 } from 'lucide-react';
 import { JURISDICTIONS_LIST, CATEGORIES_LIST } from '../components/Filters';
 import { apiUrl } from '../config';
+import {
+  computeArticlesSignature,
+  fetchArticles,
+  fetchPublishingStats,
+  notifyCatalogUpdated,
+  subscribeCatalogUpdates,
+} from '../services/api';
 
 const PIPELINE_STAGES = [
   { id: 1, name: "1. Topic Discovery", desc: "AI Random Selection across 10 Jurisdictions" },
@@ -47,21 +54,56 @@ export default function AdminPortal({
   const [customCategory, setCustomCategory] = useState('Constitutional & Democratic Law');
   const [customType, setCustomType] = useState('VERDICT_BRIEF');
 
-  const loadAllData = async () => {
-    setLoading(true);
+  // Refs for silent ETag live sync without flicker
+  const articlesEtagRef = useRef(null);
+  const statsEtagRef = useRef(null);
+  const articlesSigRef = useRef('');
+  const lastRunKeyRef = useRef(null);
+
+  const syncArticlesAndStats = useCallback(async ({ silent = true, force = false } = {}) => {
     try {
-      const [artRes, statsRes, autoRes] = await Promise.all([
-        fetch(apiUrl('/api/v1/articles?limit=100&status=ALL')),
-        fetch(apiUrl('/api/v1/publishing/stats')),
+      const [artRes, statsRes] = await Promise.all([
+        fetchArticles({
+          limit: 100,
+          status: 'ALL',
+          knownEtag: force || !silent ? null : articlesEtagRef.current,
+        }),
+        fetchPublishingStats({
+          knownEtag: force || !silent ? null : statsEtagRef.current,
+        }),
+      ]);
+
+      if (!artRes.unchanged) {
+        articlesEtagRef.current = artRes.etag || null;
+        const sig = computeArticlesSignature(artRes.articles, artRes.total);
+        if (!silent || sig !== articlesSigRef.current) {
+          articlesSigRef.current = sig;
+          setArticles(artRes.articles);
+        }
+      }
+
+      if (!statsRes.unchanged && statsRes.stats) {
+        statsEtagRef.current = statsRes.etag || null;
+        setStats(statsRes.stats);
+      }
+    } catch (e) {
+      if (!silent) {
+        console.error('Error syncing admin articles/stats:', e);
+      }
+    }
+  }, []);
+
+  const loadAllData = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
+    try {
+      const [, autoRes] = await Promise.all([
+        syncArticlesAndStats({ silent, force: !silent }),
         fetch(apiUrl('/api/v1/automation/status')),
       ]);
-      const artData = await artRes.json();
-      const statsData = await statsRes.json();
       const autoData = await autoRes.json();
 
-      setArticles(artData.articles || []);
-      setStats(statsData);
       setAutomationStatus(autoData);
+      lastRunKeyRef.current = `${autoData?.total_runs || 0}|${autoData?.successful_runs || 0}|${autoData?.articles_generated_today || 0}|${autoData?.last_run_at || ''}`;
       if (autoData?.seconds_until_next_run !== undefined && autoData?.seconds_until_next_run !== null) {
         setNextRunCountdown(autoData.seconds_until_next_run);
       }
@@ -71,14 +113,16 @@ export default function AdminPortal({
     } catch (e) {
       console.error('Error loading admin data:', e);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
+  }, [syncArticlesAndStats]);
 
   useEffect(() => {
-    loadAllData();
-    // Poll telemetry every 3.5s for syncing server stats
+    loadAllData({ silent: false });
+
+    // Poll telemetry + silent ETag articles/stats sync every 3.5s
     const pollInterval = setInterval(async () => {
+      if (document.visibilityState !== 'visible') return;
       try {
         const autoRes = await fetch(apiUrl('/api/v1/automation/status'));
         const autoData = await autoRes.json();
@@ -89,10 +133,39 @@ export default function AdminPortal({
         if (autoData?.seconds_until_reset !== undefined && autoData?.seconds_until_reset !== null) {
           setResetCountdown(autoData.seconds_until_reset);
         }
+
+        const nextRunKey = `${autoData?.total_runs || 0}|${autoData?.successful_runs || 0}|${autoData?.articles_generated_today || 0}|${autoData?.last_run_at || ''}`;
+        const runChanged = lastRunKeyRef.current !== null && nextRunKey !== lastRunKeyRef.current;
+        lastRunKeyRef.current = nextRunKey;
+
+        // If autopilot completed a run, notify user tabs too & force-sync catalog
+        if (runChanged) {
+          notifyCatalogUpdated('autopilot');
+        }
+        await syncArticlesAndStats({ silent: true, force: runChanged });
       } catch {}
     }, 3500);
-    return () => clearInterval(pollInterval);
-  }, []);
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        syncArticlesAndStats({ silent: true });
+      }
+    };
+
+    const unsubscribeSync = subscribeCatalogUpdates(() => {
+      syncArticlesAndStats({ silent: true, force: true });
+    });
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      clearInterval(pollInterval);
+      unsubscribeSync();
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, [loadAllData, syncArticlesAndStats]);
 
   // Live 1-second ticking countdown clock for smooth second-by-second updates
   useEffect(() => {
@@ -149,7 +222,7 @@ export default function AdminPortal({
         type: 'success',
         text: "Daily production counter has been successfully reset to 0/200!"
       });
-      loadAllData();
+      await loadAllData({ silent: true });
     } catch (e) {
       setMessage({ type: 'error', text: `Failed to reset counter: ${e.message}` });
     } finally {
@@ -173,7 +246,7 @@ export default function AdminPortal({
             ? 'Autonomous Legal Publisher Engine PAUSED.' 
             : '24/7 Autonomous Publisher ACTIVATED! Generating up to 200 dossiers/day.',
         });
-        loadAllData();
+        await loadAllData({ silent: true });
       }
     } catch (e) {
       setMessage({ type: 'error', text: e.message });
@@ -194,13 +267,14 @@ export default function AdminPortal({
           type: 'success',
           text: `Autonomous published: "${data.result.title}" (${data.result.jurisdiction}) with Score ${data.result.score}/10!`,
         });
-        loadAllData();
+        await loadAllData({ silent: true });
+        notifyCatalogUpdated('autonomous_trigger');
       } else {
         setMessage({
           type: 'info',
           text: `Autonomous cycle finished: ${data.result?.status || 'Completed'}`,
         });
-        loadAllData();
+        await loadAllData({ silent: true });
       }
     } catch (e) {
       setMessage({ type: 'error', text: e.message });
@@ -210,7 +284,8 @@ export default function AdminPortal({
   const handleToggleArticleStatus = async (id) => {
     try {
       await fetch(apiUrl(`/api/v1/publishing/articles/${id}/toggle-status`), { method: 'POST' });
-      loadAllData();
+      await loadAllData({ silent: true });
+      notifyCatalogUpdated('toggle_status');
     } catch (e) {
       console.error(e);
     }
@@ -221,7 +296,8 @@ export default function AdminPortal({
     try {
       await fetch(apiUrl(`/api/v1/publishing/articles/${id}`), { method: 'DELETE' });
       setMessage({ type: 'success', text: `Article #${id} deleted successfully.` });
-      loadAllData();
+      await loadAllData({ silent: true });
+      notifyCatalogUpdated('delete');
     } catch (e) {
       setMessage({ type: 'error', text: e.message });
     }
@@ -232,7 +308,8 @@ export default function AdminPortal({
       const res = await fetch(apiUrl('/api/v1/publishing/batch-publish'), { method: 'POST' });
       const data = await res.json();
       setMessage({ type: 'success', text: `Published all ${data.published_count} in-review articles!` });
-      loadAllData();
+      await loadAllData({ silent: true });
+      notifyCatalogUpdated('batch_publish');
     } catch (e) {
       console.error(e);
     }
@@ -271,7 +348,8 @@ export default function AdminPortal({
 
       if (res.ok) {
         setPipelineResult(data.workflow_result);
-        loadAllData();
+        await loadAllData({ silent: true });
+        notifyCatalogUpdated('workflow_run');
       } else {
         setMessage({ type: 'error', text: data.detail || 'Pipeline execution failed.' });
       }
@@ -360,8 +438,16 @@ export default function AdminPortal({
             </button>
           </nav>
 
-          {/* Exit to Public Portal */}
+          {/* Exit to Public Portal + Live Sync Indicator */}
           <div className="flex items-center gap-3">
+            <span
+              className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300"
+              title="Automatically syncs newly published articles without manual refresh"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Live Sync</span>
+            </span>
+
             <button
               onClick={onExitToUserPortal}
               className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-bold border border-slate-700 flex items-center gap-1.5 transition-all"

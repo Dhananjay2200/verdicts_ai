@@ -5,6 +5,7 @@ Rotates through global legal jurisdictions and categories to discover landmark c
 
 import re
 import random
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from app.database.models import VerdictTopic
