@@ -266,9 +266,44 @@ class DiscoveryService:
                 "article_type": article_type,
             }
         
-        # Fallback dynamic discovery
+        # Fallback dynamic discovery: for LEGAL_NEWS, fetch real latest legal news from web first
         jur = target_jurisdiction or random.choice(JURISDICTIONS)
         cat = target_category or random.choice(CATEGORIES)
+
+        if article_type == "LEGAL_NEWS":
+            try:
+                from app.services.research_service import ResearchService
+                live_news = await ResearchService().fetch_latest_news(
+                    jurisdiction=jur,
+                    category=cat,
+                    limit=10,
+                )
+                for news_item in live_news:
+                    headline = (news_item.get("title") or "").strip()[:220]
+                    if not headline:
+                        continue
+                    canonical = generate_canonical_key(headline)
+                    existing = self.db.query(VerdictTopic).filter(
+                        VerdictTopic.canonical_name == canonical
+                    ).first()
+                    if not existing:
+                        return {
+                            "name": headline,
+                            "canonical_name": canonical,
+                            "category": cat,
+                            "jurisdiction": jur,
+                            "court_name": news_item.get("source") or f"Judicial Authority ({jur})",
+                            "case_citation": news_item.get("source") or "Live Legal Dispatch",
+                            "decision_date": news_item.get("published_date") or datetime.utcnow().strftime("%B %d, %Y"),
+                            "bench": "Presiding Court / Regulatory Panel",
+                            "vote_split": "Breaking Ruling",
+                            "key_holding": (news_item.get("snippet") or f"Latest judicial development in {cat} ({jur}).")[:500],
+                            "source_url": news_item.get("url"),
+                            "article_type": "LEGAL_NEWS",
+                        }
+            except Exception as e:
+                logger.warning(f"Live news discovery fallback failed: {e}")
+
         name = f"In re Global Precedents on {cat} ({jur})" if article_type == "VERDICT_BRIEF" else f"Worldwide Judicial Developments in {cat} ({jur})"
         now_date = datetime.utcnow().strftime("%B %d, %Y")
         

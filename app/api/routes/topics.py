@@ -2,14 +2,39 @@
 Topics API Route.
 """
 
-from typing import Optional, List
+from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.database.models import VerdictTopic
 from app.services.discovery_service import JURISDICTIONS, CATEGORIES
+from app.services.research_service import ResearchService
 
 router = APIRouter(prefix="/topics", tags=["Topics"])
+
+
+@router.get("/latest-news")
+async def get_latest_legal_news(
+    jurisdiction: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    days: int = Query(7, ge=1, le=30),
+    limit: int = Query(8, ge=1, le=20),
+):
+    """Fetches real-time latest court rulings & breaking legal news from Tavily News / RSS."""
+    news = await ResearchService().fetch_latest_news(
+        jurisdiction=jurisdiction,
+        category=category,
+        query=query,
+        limit=limit,
+        days=days,
+    )
+    source = news[0]["discovery_source"] if news else "none"
+    return {
+        "total": len(news),
+        "source": source,
+        "news": news,
+    }
 
 @router.get("")
 def get_topics(

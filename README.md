@@ -113,11 +113,11 @@ python test_db.py
 - **End-to-End Pipeline**: `python test_workflow.py`
 - **API Endpoints**: `python test_api.py`
 
-### 3. Running Backend (FastAPI on Port 8002)
+### 3. Running Backend (FastAPI on Port 8088)
 ```powershell
 python run_server.py
 ```
-API Documentation will be available at: `http://127.0.0.1:8002/docs`
+API Documentation will be available at: `http://127.0.0.1:8088/docs`
 
 ### 4. Running Frontend (Vite + React on Port 5175)
 ```powershell

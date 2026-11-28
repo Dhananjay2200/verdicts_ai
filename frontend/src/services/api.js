@@ -3,7 +3,11 @@
  * Maps cleanly to the FastAPI backend endpoints under /api/v1.
  */
 
-const rawApiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:5000';
+const rawApiUrl =
+  import.meta.env.VITE_BASE_URL ??
+  import.meta.env.VITE_API_URL ??
+  import.meta.env.VITE_API_BASE_URL ??
+  'http://127.0.0.1:8088';
 export const API_BASE_URL = rawApiUrl.replace(/\/+$/, '');
 
 export function buildApiUrl(path) {
@@ -212,6 +216,27 @@ export async function fetchTopics({ jurisdiction, category, articleType, limit =
   params.set('limit', String(limit));
 
   const res = await requestJson(`/api/v1/topics?${params.toString()}`);
+  return res.data;
+}
+
+/**
+ * Fetch live latest court rulings & legal news from GET /api/v1/topics/latest-news.
+ */
+export async function fetchLatestLegalNews({
+  jurisdiction,
+  category,
+  query,
+  days = 7,
+  limit = 8,
+} = {}) {
+  const params = new URLSearchParams();
+  if (jurisdiction && jurisdiction !== 'All Jurisdictions') params.set('jurisdiction', jurisdiction);
+  if (category && category !== 'All Categories') params.set('category', category);
+  if (query && query.trim()) params.set('query', query.trim());
+  params.set('days', String(days));
+  params.set('limit', String(limit));
+
+  const res = await requestJson(`/api/v1/topics/latest-news?${params.toString()}`);
   return res.data;
 }
 

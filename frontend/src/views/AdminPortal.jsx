@@ -9,6 +9,7 @@ import { apiUrl } from '../config';
 import {
   computeArticlesSignature,
   fetchArticles,
+  fetchLatestLegalNews,
   fetchPublishingStats,
   notifyCatalogUpdated,
   subscribeCatalogUpdates,
@@ -53,6 +54,12 @@ export default function AdminPortal({
   const [customJurisdiction, setCustomJurisdiction] = useState('United States');
   const [customCategory, setCustomCategory] = useState('Constitutional & Democratic Law');
   const [customType, setCustomType] = useState('VERDICT_BRIEF');
+
+  // Live latest legal news fetcher state
+  const [liveNewsItems, setLiveNewsItems] = useState([]);
+  const [liveNewsSource, setLiveNewsSource] = useState('');
+  const [fetchingLiveNews, setFetchingLiveNews] = useState(false);
+  const [newsSearchKeyword, setNewsSearchKeyword] = useState('');
 
   // Refs for silent ETag live sync without flicker
   const articlesEtagRef = useRef(null);
@@ -312,6 +319,70 @@ export default function AdminPortal({
       notifyCatalogUpdated('batch_publish');
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleFetchLatestNews = async () => {
+    setFetchingLiveNews(true);
+    try {
+      const data = await fetchLatestLegalNews({
+        jurisdiction: customJurisdiction,
+        category: customCategory,
+        query: newsSearchKeyword,
+        days: 7,
+        limit: 8,
+      });
+      setLiveNewsItems(data.news || []);
+      setLiveNewsSource(data.source || '');
+      if (!data.news || data.news.length === 0) {
+        setMessage({
+          type: 'info',
+          text: 'No live news headlines matched those filters. Try another keyword or jurisdiction.',
+        });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: `Failed to fetch latest news: ${err.message}` });
+    } finally {
+      setFetchingLiveNews(false);
+    }
+  };
+
+  const handlePublishLiveNewsItem = async (item) => {
+    setRunningPipeline(true);
+    setPipelineResult(null);
+    setActiveStage(1);
+    const stageTimer = setInterval(() => {
+      setActiveStage((prev) => (prev < 6 ? prev + 1 : prev));
+    }, 4000);
+
+    try {
+      const res = await fetch(apiUrl('/api/v1/workflow/run'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: item.title,
+          jurisdiction: item.jurisdiction && item.jurisdiction !== 'Global' ? item.jurisdiction : customJurisdiction,
+          category: item.category || customCategory,
+          article_type: 'LEGAL_NEWS',
+          news_angle: item.title,
+        }),
+      });
+      const data = await res.json();
+      clearInterval(stageTimer);
+      setActiveStage(7);
+
+      if (res.ok) {
+        setPipelineResult(data.workflow_result);
+        await loadAllData({ silent: true });
+        notifyCatalogUpdated('workflow_run');
+      } else {
+        setMessage({ type: 'error', text: data.detail || 'Failed to publish live news story.' });
+      }
+    } catch (err) {
+      clearInterval(stageTimer);
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setRunningPipeline(false);
     }
   };
 
@@ -1077,6 +1148,109 @@ export default function AdminPortal({
                 </div>
               )}
 
+            </div>
+
+            {/* Live Latest Legal News Fetcher */}
+            <div className="p-6 rounded-2xl bg-[#0b132b] border border-slate-800 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-serif-title text-lg font-bold text-white flex items-center gap-2">
+                    <Newspaper className="w-5 h-5 text-red-400" />
+                    <span>Live Latest Legal News Fetcher</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Fetch real-time court rulings and breaking legal news via Tavily News &amp; RSS, then publish with one click.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={fetchingLiveNews}
+                  onClick={handleFetchLatestNews}
+                  className="px-4 py-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 disabled:opacity-50 text-red-200 border border-red-500/40 text-xs font-bold flex items-center gap-2 transition-all shrink-0 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${fetchingLiveNews ? 'animate-spin' : ''}`} />
+                  <span>{fetchingLiveNews ? 'Fetching Latest News...' : 'Fetch Latest News'}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <input
+                  type="text"
+                  value={newsSearchKeyword}
+                  onChange={(e) => setNewsSearchKeyword(e.target.value)}
+                  placeholder="Optional topic (e.g. Supreme Court, AI, Antitrust)..."
+                  className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400"
+                />
+                <select
+                  value={customJurisdiction}
+                  onChange={(e) => setCustomJurisdiction(e.target.value)}
+                  className="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-lg p-2 focus:outline-none focus:border-amber-400"
+                >
+                  {JURISDICTIONS_LIST.map((j) => (
+                    <option key={j} value={j}>{j}</option>
+                  ))}
+                </select>
+                <select
+                  value={customCategory}
+                  onChange={(e) => setCustomCategory(e.target.value)}
+                  className="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded-lg p-2 focus:outline-none focus:border-amber-400"
+                >
+                  {CATEGORIES_LIST.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+
+              {liveNewsItems.length > 0 && (
+                <div className="space-y-2.5 pt-2 border-t border-slate-800">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span>Found {liveNewsItems.length} live headlines</span>
+                    {liveNewsSource && <span className="font-mono text-amber-300">Source: {liveNewsSource}</span>}
+                  </div>
+                  <div className="divide-y divide-slate-800 border border-slate-800 rounded-xl overflow-hidden bg-slate-950/60">
+                    {liveNewsItems.map((item, idx) => (
+                      <div key={`${item.url || item.title}-${idx}`} className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-900/50">
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
+                            <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30 font-semibold">
+                              {item.source}
+                            </span>
+                            <span>{item.published_date}</span>
+                            {item.url && (
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-amber-400 hover:underline truncate max-w-[220px]"
+                              >
+                                Source link
+                              </a>
+                            )}
+                          </div>
+                          <div className="text-xs font-bold text-white leading-snug">
+                            {item.title}
+                          </div>
+                          {item.snippet && (
+                            <p className="text-[11px] text-slate-400 line-clamp-2">
+                              {item.snippet}
+                            </p>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={runningPipeline}
+                          onClick={() => handlePublishLiveNewsItem(item)}
+                          className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold shrink-0 cursor-pointer"
+                        >
+                          Generate &amp; Publish
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
           </div>

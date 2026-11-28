@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "testing", "production"] = "development"
     DEBUG: bool = True
     HOST: str = "127.0.0.1"
-    PORT: int = 8002
+    PORT: int = 8088
 
     @field_validator("DEBUG", mode="before")
     @classmethod

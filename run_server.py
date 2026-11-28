@@ -1,6 +1,6 @@
 """
 Server launcher for Verdicts AI.
-Runs FastAPI on port 8002.
+Runs FastAPI on port 8088.
 """
 
 import uvicorn
