@@ -13,6 +13,7 @@ import {
   API_BASE_URL,
   computeArticlesSignature,
   fetchArticles,
+  fetchPublishingStats,
   fetchTopics,
   subscribeCatalogUpdates,
 } from './services/api';
@@ -56,11 +57,11 @@ export default function App() {
   // Newly published notice banner (auto-dismissed)
   const [liveUpdateBanner, setLiveUpdateBanner] = useState(null);
 
-  // Refs for silent ETag polling without flicker
-  const etagRef = useRef(null);
+  // Refs for silent live sync without repeated 304 conditional requests or UI flicker
   const signatureRef = useRef('');
   const knownIdsRef = useRef(new Set());
   const hasLoadedOnceRef = useRef(false);
+  const lastStatsSigRef = useRef(null);
 
   // Sync browser back/forward navigation
   useEffect(() => {
@@ -101,13 +102,12 @@ export default function App() {
       });
   }, [route.view]);
 
-  // Load articles when filters or view change; supports silent ETag polling
+  // Load articles when filters or view change
   const loadArticles = useCallback(
     async ({ silent = false } = {}) => {
       if (!silent) {
         setLoading(true);
         setError(null);
-        etagRef.current = null;
       }
 
       const activeTab = TOPIC_TABS.find((t) => t.id === activeTabId) || TOPIC_TABS[0];
@@ -121,14 +121,13 @@ export default function App() {
           status: 'PUBLISHED',
           limit: 50,
           offset: 0,
-          knownEtag: silent ? etagRef.current : null,
+          bypassCache: true,
         });
 
         if (data.unchanged) {
           return;
         }
 
-        etagRef.current = data.etag || null;
         const nextSignature = computeArticlesSignature(data.articles, data.total);
 
         if (silent && nextSignature === signatureRef.current) {
@@ -173,24 +172,41 @@ export default function App() {
     }
   }, [route.view, loadArticles]);
 
-  // Automatic background live sync (ETag polling + cross-tab BroadcastChannel + window focus)
+  // Lightweight live sync: checks publishing stats and only reloads articles on actual catalog changes
   useEffect(() => {
     if (route.view !== 'home') return;
 
-    const pollId = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        loadArticles({ silent: true });
+    const checkForUpdates = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetchPublishingStats({ bypassCache: true });
+        const s = res?.stats;
+        if (!s) return;
+        const sig = `${s.total_articles ?? 0}:${s.published ?? 0}:${s.in_review ?? 0}:${s.verdicts_count ?? 0}:${s.legal_news_count ?? 0}`;
+        if (lastStatsSigRef.current === null) {
+          lastStatsSigRef.current = sig;
+          return;
+        }
+        if (lastStatsSigRef.current !== sig) {
+          lastStatsSigRef.current = sig;
+          loadArticles({ silent: true });
+        }
+      } catch {
+        // Ignore silent background check errors
       }
-    }, 5000);
+    };
+
+    checkForUpdates();
+    const pollId = setInterval(checkForUpdates, 15000);
 
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
-        loadArticles({ silent: true });
+        checkForUpdates();
       }
     };
 
     const unsubscribeSync = subscribeCatalogUpdates(() => {
-      etagRef.current = null;
+      lastStatsSigRef.current = null;
       loadArticles({ silent: true });
     });
 

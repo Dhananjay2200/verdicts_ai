@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database.session import get_db, SessionLocal
 from app.database.models import VerdictArticle
@@ -21,14 +22,16 @@ class UpdateStatusRequest(BaseModel):
     status: str  # "PUBLISHED", "IN_REVIEW", "DRAFT"
 
 
-def _cache_headers(etag: str) -> dict:
-    return {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+def _cache_headers(etag: str, is_gzip: bool = False) -> dict:
+    headers = {
+        "Cache-Control": "public, max-age=0, s-maxage=120, stale-while-revalidate=600, must-revalidate",
         "ETag": etag,
+        "Vary": "Accept-Encoding",
         "X-Cache-Engine": "VerdictsAI-HighConcurrency-MemoryCache",
     }
+    if is_gzip:
+        headers["Content-Encoding"] = "gzip"
+    return headers
 
 
 @router.post("/update-status")
@@ -77,23 +80,23 @@ def batch_publish_in_review(db: Session = Depends(get_db)):
 
 @router.get("/stats")
 async def get_publishing_stats(request: Request):
-    """Returns dashboard statistics with zero-DB RAM caching and ETag 304 support."""
+    """Returns dashboard statistics with zero-DB RAM caching, single-flight load, and ETag 304."""
     cache_key = "stats:system"
-    json_bytes, etag = cache_service.get_json(cache_key)
-    if json_bytes is None:
+    accept_enc = request.headers.get("accept-encoding", "")
+    payload_bytes, etag, is_gzip = cache_service.get_response_bytes(cache_key, accept_enc)
+    if payload_bytes is None:
         def _load_stats():
             db = SessionLocal()
             try:
-                total_articles = db.query(VerdictArticle).count()
-                published = db.query(VerdictArticle).filter(VerdictArticle.status == "PUBLISHED").count()
-                in_review = db.query(VerdictArticle).filter(VerdictArticle.status == "IN_REVIEW").count()
-                verdicts = db.query(VerdictArticle).filter(VerdictArticle.article_type == "VERDICT_BRIEF").count()
-                news = db.query(VerdictArticle).filter(VerdictArticle.article_type == "LEGAL_NEWS").count()
+                total_articles = db.query(func.count(VerdictArticle.id)).scalar() or 0
+                published = db.query(func.count(VerdictArticle.id)).filter(VerdictArticle.status == "PUBLISHED").scalar() or 0
+                in_review = db.query(func.count(VerdictArticle.id)).filter(VerdictArticle.status == "IN_REVIEW").scalar() or 0
+                verdicts = db.query(func.count(VerdictArticle.id)).filter(VerdictArticle.article_type == "VERDICT_BRIEF").scalar() or 0
+                news = db.query(func.count(VerdictArticle.id)).filter(VerdictArticle.article_type == "LEGAL_NEWS").scalar() or 0
+                avg_val = db.query(func.avg(VerdictArticle.score)).scalar()
+                avg_score = round(float(avg_val), 2) if avg_val is not None else 9.0
 
-                articles = db.query(VerdictArticle.score).all()
-                avg_score = round(sum(a[0] for a in articles) / len(articles), 2) if articles else 9.0
-
-                stats = {
+                return {
                     "total_articles": total_articles,
                     "published": published,
                     "in_review": in_review,
@@ -101,31 +104,24 @@ async def get_publishing_stats(request: Request):
                     "legal_news_count": news,
                     "average_score": avg_score,
                 }
-                etag_val = cache_service.set(cache_key, stats)
-                raw, _ = cache_service.get_json(cache_key)
-                if raw is None:
-                    raw = json.dumps(stats, default=str).encode("utf-8")
-                return raw, etag_val
             finally:
                 db.close()
 
-        json_bytes, etag = await run_in_threadpool(_load_stats)
+        payload_bytes, etag, is_gzip = await run_in_threadpool(
+            cache_service.get_or_load_response, cache_key, _load_stats, accept_enc
+        )
 
     if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match.strip() == etag:
+    if if_none_match and etag and if_none_match.strip() == etag:
         return Response(
             status_code=304,
-            headers={
-                "ETag": etag,
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "X-Cache-Engine": "VerdictsAI-HighConcurrency-MemoryCache",
-            },
+            headers=_cache_headers(etag),
         )
 
     return Response(
-        content=json_bytes,
+        content=payload_bytes,
         media_type="application/json",
-        headers=_cache_headers(etag),
+        headers=_cache_headers(etag, is_gzip=is_gzip),
     )
 
 

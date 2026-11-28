@@ -4,14 +4,17 @@
  */
 
 const rawApiUrl =
-  import.meta.env.VITE_BASE_URL ??
   import.meta.env.VITE_API_URL ??
+  import.meta.env.VITE_BASE_URL ??
   import.meta.env.VITE_API_BASE_URL ??
-  'http://127.0.0.1:8088';
-export const API_BASE_URL = rawApiUrl.replace(/\/+$/, '');
+  'https://verdicts.in';
+export const API_BASE_URL = String(rawApiUrl)
+  .trim()
+  .replace(/\/+$/, '')
+  .replace(/\/api$/i, '');
 
 export function buildApiUrl(path) {
-  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const cleanPath = `/${String(path || '').replace(/^\/+/, '')}`;
   return `${API_BASE_URL}${cleanPath}`;
 }
 
@@ -152,6 +155,7 @@ export async function fetchArticles({
   limit = 50,
   offset = 0,
   knownEtag = null,
+  bypassCache = false,
 } = {}) {
   const params = new URLSearchParams();
   if (category && category !== 'All Categories') params.set('category', category);
@@ -167,6 +171,7 @@ export async function fetchArticles({
   const res = await requestJson(`/api/v1/articles?${params.toString()}`, {
     headers,
     knownEtag,
+    ...(bypassCache ? { cache: 'no-store' } : {}),
   });
 
   if (res.__notModified) {
@@ -243,9 +248,13 @@ export async function fetchLatestLegalNews({
 /**
  * Fetch publishing statistics from GET /api/v1/publishing/stats.
  */
-export async function fetchPublishingStats({ knownEtag = null } = {}) {
-  const headers = knownEtag ? { 'If-None-Match': knownEtag } : {};
-  const res = await requestJson('/api/v1/publishing/stats', { headers, knownEtag });
+export async function fetchPublishingStats({ knownEtag = null, bypassCache = false } = {}) {
+  const headers = knownEtag && !bypassCache ? { 'If-None-Match': knownEtag } : {};
+  const res = await requestJson('/api/v1/publishing/stats', {
+    headers,
+    knownEtag: bypassCache ? null : knownEtag,
+    ...(bypassCache ? { cache: 'no-store' } : {}),
+  });
   if (res.__notModified) {
     return { unchanged: true, etag: res.etag };
   }

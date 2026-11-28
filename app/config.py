@@ -3,7 +3,8 @@ Verdicts AI - Application Configuration Module.
 """
 
 from functools import lru_cache
-from typing import Any, Literal
+import json
+from typing import Any, List, Literal, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     HOST: str = "127.0.0.1"
     PORT: int = 8088
+    SITE_URL: str = "https://verdicts.in"
+    FRONTEND_URL: str = "https://verdicts.in"
+    ALLOWED_HOSTS: str = "verdicts.in,www.verdicts.in,127.0.0.1,localhost"
+    CORS_ORIGINS: str = "https://verdicts.in,https://www.verdicts.in,http://127.0.0.1:5175,http://localhost:5175"
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -75,12 +80,44 @@ class Settings(BaseSettings):
     DAILY_ARTICLE_LIMIT: int = 200
     DEFAULT_QUALITY_THRESHOLD: float = 8.0
 
-    # Admin Portal Authentication
+    # Admin Portal Authentication & HTTPS Cookie Settings
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "verdictsadmin123"
     JWT_SECRET_KEY: str = "verdicts-ai-super-secret-judicial-jwt-key-2026"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
+    COOKIE_DOMAIN: str = ".verdicts.in"
+    COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
+    COOKIE_SECURE: Optional[bool] = None
+
+    @property
+    def cookie_secure_flag(self) -> bool:
+        if self.COOKIE_SECURE is not None:
+            return self.COOKIE_SECURE
+        return self.APP_ENV == "production"
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        raw = (self.CORS_ORIGINS or "").strip()
+        origins: List[str] = []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    origins = [str(o).strip().rstrip("/") for o in parsed if str(o).strip()]
+            except Exception:
+                origins = []
+        if not origins:
+            origins = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+
+        if "*" in origins:
+            return ["*"]
+
+        for base in ("https://verdicts.in", "https://www.verdicts.in", self.SITE_URL, self.FRONTEND_URL):
+            clean = (base or "").strip().rstrip("/")
+            if clean and clean not in origins:
+                origins.append(clean)
+        return origins
 
     model_config = SettingsConfigDict(
         env_file=".env",

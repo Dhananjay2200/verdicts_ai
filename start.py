@@ -109,7 +109,9 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env.setdefault("VITE_BASE_URL", f"http://{connect_host}:{settings.PORT}")
+    local_backend_url = f"http://{connect_host}:{settings.PORT}"
+    env["VITE_API_URL"] = local_backend_url
+    env["VITE_BASE_URL"] = local_backend_url
 
     backend_cmd = [sys.executable, str(ROOT_DIR / "run_server.py")]
     frontend_cmd = [npm_exe, "run", "dev", "--", "--host", "127.0.0.1", "--port", str(FRONTEND_PORT)]

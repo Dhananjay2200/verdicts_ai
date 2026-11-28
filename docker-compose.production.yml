@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # Layer 1: High-Concurrency Edge Reverse Proxy & Micro-Cache
+  nginx:
+    image: nginx:alpine
+    container_name: verdicts_edge_proxy
+    restart: always
+    network_mode: host
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_cache:/var/cache/nginx/verdicts
+    depends_on:
+      - backend
+
+  # Layer 2: Auto-Scalable FastAPI Backend Workers Cluster
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "127.0.0.1:8088:8088"
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - HOST=0.0.0.0
+      - PORT=8088
+      - SITE_URL=https://verdicts.in
+      - FRONTEND_URL=https://verdicts.in
+      - CORS_ORIGINS=https://verdicts.in,https://www.verdicts.in
+      - COOKIE_DOMAIN=.verdicts.in
+      - COOKIE_SAMESITE=lax
+      - COOKIE_SECURE=true
+      - DATABASE_URL=postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:-Dk#22000}@postgres:5432/verdicts_ai
+      - DB_POOL_SIZE=50
+      - DB_MAX_OVERFLOW=100
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - NVIDIA_MODEL_NAME=nvidia/nemotron-3.5-bolt-e4b
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - verdicts_net
+
+  # Layer 3: High-Speed In-Memory Cache
+  redis:
+    image: redis:7-alpine
+    container_name: verdicts_redis
+    restart: always
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
+    networks:
+      - verdicts_net
+
+  # Layer 4: Production PostgreSQL with High-Connection Tuning
+  postgres:
+    image: postgres:16-alpine
+    container_name: verdicts_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Dk#22000}
+      POSTGRES_DB: verdicts_ai
+    command: >
+      postgres
+      -c max_connections=300
+      -c shared_buffers=512MB
+      -c effective_cache_size=1536MB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c work_mem=16MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - verdicts_net
+
+networks:
+  verdicts_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  nginx_cache:

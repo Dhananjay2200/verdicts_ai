@@ -55,6 +55,14 @@ def init_models() -> None:
                     "CREATE INDEX IF NOT EXISTS idx_verdict_feed_filters "
                     "ON verdict_articles (status, article_type, category, jurisdiction);"
                 ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_verdict_topics_created "
+                    "ON verdict_topics (created_at DESC);"
+                ))
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_verdict_topics_filters "
+                    "ON verdict_topics (jurisdiction, category, article_type);"
+                ))
         logger.info("[+] Database schema & high-concurrency composite indexes verified/created.")
     except Exception as e:
         logger.error(f"[-] Database table initialization failed: {e}")

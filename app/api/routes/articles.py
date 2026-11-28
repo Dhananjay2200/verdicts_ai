@@ -1,29 +1,61 @@
 """
 Articles API Route.
 Provides high-concurrency endpoints for fetching verdicts and legal news with
-zero-DB-session RAM caching and HTTP 304 ETag short-circuiting for 1M+ readers.
+zero-DB-session RAM caching, single-flight DB protection, buffered view tracking,
+and HTTP 304 ETag short-circuiting for 1M+ concurrent readers.
 """
 
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy.orm import Session
-from app.database.session import get_db, SessionLocal
+from app.database.session import SessionLocal
 from app.database.models import VerdictArticle, QualityAudit
 from app.services.cache_service import cache_service
 
 router = APIRouter(prefix="/articles", tags=["Articles"])
 
 
-def _cache_headers(etag: str) -> dict:
-    return {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
+def _cache_headers(etag: str, is_gzip: bool = False, private_admin: bool = False) -> dict:
+    cache_ctrl = (
+        "no-cache, no-store, must-revalidate"
+        if private_admin
+        else "public, max-age=30, s-maxage=120, stale-while-revalidate=600"
+    )
+    headers = {
+        "Cache-Control": cache_ctrl,
         "ETag": etag,
+        "Vary": "Accept-Encoding",
         "X-Cache-Engine": "VerdictsAI-HighConcurrency-MemoryCache",
     }
+    if is_gzip:
+        headers["Content-Encoding"] = "gzip"
+    return headers
+
+
+def _not_modified_response(etag: str, private_admin: bool = False) -> Response:
+    return Response(
+        status_code=304,
+        headers=_cache_headers(etag, private_admin=private_admin),
+    )
+
+
+def _cached_json_response(
+    request: Request,
+    payload_bytes: bytes,
+    etag: Optional[str],
+    is_gzip: bool,
+    private_admin: bool = False,
+) -> Response:
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and etag and if_none_match.strip() == etag:
+        return _not_modified_response(etag, private_admin=private_admin)
+
+    return Response(
+        content=payload_bytes,
+        media_type="application/json",
+        headers=_cache_headers(etag, is_gzip=is_gzip, private_admin=private_admin),
+    )
 
 
 def _build_articles_cache_key(
@@ -56,7 +88,7 @@ async def get_articles(
 ):
     """
     Combines multi-way filters (Jurisdiction, Category, Year, Type, Search) with pagination.
-    Serves repeated requests directly from RAM with ETag 304 short-circuiting.
+    Serves repeated requests directly from RAM with single-flight protection & ETag 304.
     """
     cache_key = _build_articles_cache_key(
         category=category,
@@ -69,8 +101,9 @@ async def get_articles(
         offset=offset,
     )
 
-    json_bytes, etag = cache_service.get_json(cache_key)
-    if json_bytes is None:
+    accept_enc = request.headers.get("accept-encoding", "")
+    payload_bytes, etag, is_gzip = cache_service.get_response_bytes(cache_key, accept_enc)
+    if payload_bytes is None:
         def _load_articles():
             db = SessionLocal()
             try:
@@ -103,62 +136,84 @@ async def get_articles(
                 total = query.count()
                 articles = query.order_by(VerdictArticle.created_at.desc()).offset(offset).limit(limit).all()
 
-                payload = jsonable_encoder({
+                return jsonable_encoder({
                     "total": total,
                     "limit": limit,
                     "offset": offset,
                     "articles": articles,
                 })
-                etag_val = cache_service.set(cache_key, payload)
-                raw, _ = cache_service.get_json(cache_key)
-                return raw, etag_val
             finally:
                 db.close()
 
-        json_bytes, etag = await run_in_threadpool(_load_articles)
-
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match.strip() == etag:
-        return Response(
-            status_code=304,
-            headers={
-                "ETag": etag,
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "X-Cache-Engine": "VerdictsAI-HighConcurrency-MemoryCache",
-            },
+        payload_bytes, etag, is_gzip = await run_in_threadpool(
+            cache_service.get_or_load_response, cache_key, _load_articles, accept_enc
         )
 
-    return Response(
-        content=json_bytes,
-        media_type="application/json",
-        headers=_cache_headers(etag),
+    return _cached_json_response(
+        request, payload_bytes, etag, is_gzip, private_admin=(status == "ALL")
     )
 
 
 @router.get("/slug/{slug}")
-def get_article_by_slug(slug: str, db: Session = Depends(get_db)):
-    """Fetches full 12-section judicial verdict guide or news dispatch by slug."""
-    article = db.query(VerdictArticle).filter(VerdictArticle.slug == slug).first()
-    if not article:
-        raise HTTPException(status_code=404, detail="Judicial verdict article not found.")
+async def get_article_by_slug(slug: str, request: Request):
+    """
+    Fetches full 12-section judicial verdict guide or news dispatch by slug from RAM cache.
+    Records view counts asynchronously in memory to eliminate DB row-lock contention under load.
+    """
+    cache_key = f"article:slug:{slug}"
+    accept_enc = request.headers.get("accept-encoding", "")
+    payload_bytes, etag, is_gzip = cache_service.get_response_bytes(cache_key, accept_enc)
+    if payload_bytes is None:
+        def _load_slug():
+            db = SessionLocal()
+            try:
+                article = db.query(VerdictArticle).filter(VerdictArticle.slug == slug).first()
+                if not article:
+                    return None
+                audits = db.query(QualityAudit).filter(QualityAudit.article_id == article.id).all()
+                return jsonable_encoder({
+                    "article": article,
+                    "audits": audits,
+                })
+            finally:
+                db.close()
 
-    # Increment views
-    article.view_count += 1
-    db.commit()
+        payload_bytes, etag, is_gzip = await run_in_threadpool(
+            cache_service.get_or_load_response, cache_key, _load_slug, accept_enc
+        )
+        if not payload_bytes:
+            raise HTTPException(status_code=404, detail="Judicial verdict article not found.")
 
-    # Get quality audits
-    audits = db.query(QualityAudit).filter(QualityAudit.article_id == article.id).all()
+    cached_obj, _ = cache_service.get(cache_key)
+    if isinstance(cached_obj, dict):
+        art = cached_obj.get("article")
+        if isinstance(art, dict) and art.get("id"):
+            cache_service.record_view(int(art["id"]))
 
-    return {
-        "article": article,
-        "audits": audits,
-    }
+    return _cached_json_response(request, payload_bytes, etag, is_gzip)
 
 
 @router.get("/id/{article_id}")
-def get_article_by_id(article_id: int, db: Session = Depends(get_db)):
-    """Fetches verdict article by primary key ID."""
-    article = db.query(VerdictArticle).filter(VerdictArticle.id == article_id).first()
-    if not article:
-        raise HTTPException(status_code=404, detail="Judicial verdict article not found.")
-    return article
+async def get_article_by_id(article_id: int, request: Request):
+    """Fetches verdict article by primary key ID from RAM cache with ETag 304 support."""
+    cache_key = f"article:id:{article_id}"
+    accept_enc = request.headers.get("accept-encoding", "")
+    payload_bytes, etag, is_gzip = cache_service.get_response_bytes(cache_key, accept_enc)
+    if payload_bytes is None:
+        def _load_id():
+            db = SessionLocal()
+            try:
+                article = db.query(VerdictArticle).filter(VerdictArticle.id == article_id).first()
+                if not article:
+                    return None
+                return jsonable_encoder(article)
+            finally:
+                db.close()
+
+        payload_bytes, etag, is_gzip = await run_in_threadpool(
+            cache_service.get_or_load_response, cache_key, _load_id, accept_enc
+        )
+        if not payload_bytes:
+            raise HTTPException(status_code=404, detail="Judicial verdict article not found.")
+
+    return _cached_json_response(request, payload_bytes, etag, is_gzip)

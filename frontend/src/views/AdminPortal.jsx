@@ -69,29 +69,36 @@ export default function AdminPortal({
 
   const syncArticlesAndStats = useCallback(async ({ silent = true, force = false } = {}) => {
     try {
-      const [artRes, statsRes] = await Promise.all([
-        fetchArticles({
-          limit: 100,
-          status: 'ALL',
-          knownEtag: force || !silent ? null : articlesEtagRef.current,
-        }),
-        fetchPublishingStats({
-          knownEtag: force || !silent ? null : statsEtagRef.current,
-        }),
-      ]);
+      const statsRes = await fetchPublishingStats({ bypassCache: true });
+      if (statsRes?.stats) {
+        setStats(statsRes.stats);
+      }
+
+      const s = statsRes?.stats;
+      const statsSig = s
+        ? `${s.total_articles ?? 0}:${s.published ?? 0}:${s.in_review ?? 0}:${s.verdicts_count ?? 0}:${s.legal_news_count ?? 0}`
+        : null;
+      const changed = force || !silent || (statsSig !== null && statsSig !== statsEtagRef.current);
+      if (statsSig !== null) {
+        statsEtagRef.current = statsSig;
+      }
+
+      if (!changed) {
+        return;
+      }
+
+      const artRes = await fetchArticles({
+        limit: 100,
+        status: 'ALL',
+        bypassCache: true,
+      });
 
       if (!artRes.unchanged) {
-        articlesEtagRef.current = artRes.etag || null;
         const sig = computeArticlesSignature(artRes.articles, artRes.total);
         if (!silent || sig !== articlesSigRef.current) {
           articlesSigRef.current = sig;
           setArticles(artRes.articles);
         }
-      }
-
-      if (!statsRes.unchanged && statsRes.stats) {
-        statsEtagRef.current = statsRes.etag || null;
-        setStats(statsRes.stats);
       }
     } catch (e) {
       if (!silent) {
